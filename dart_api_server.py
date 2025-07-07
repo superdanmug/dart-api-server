@@ -1,108 +1,48 @@
-# dart_api_server.py
+# ✅ 목표 1단계: DART 실제 본문 HTML에서 정보 자동 추출
+# - HTML 페이지 내 iframe -> viewDoc.do -> 실제 본문 HTML 추출
+# - 배정 비율 등 관련 텍스트 자동 수집
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 import requests
-import os
-import zipfile
-import xml.etree.ElementTree as ET
-from io import BytesIO
 from bs4 import BeautifulSoup
+import re
 
-app = FastAPI()
+# DART rcept_no에서 본문 HTML을 가져오는 함수
+def get_dart_main_html(rcept_no):
+    base_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+    response = requests.get(base_url)
+    if response.status_code != 200:
+        return None, f"접속 실패: {response.status_code}"
 
-# CORS 설정
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    soup = BeautifulSoup(response.text, "html.parser")
+    iframe = soup.find("iframe")
+    if not iframe:
+        return None, "iframe 태그 없음"
 
-# DART API 키 불러오기
-DART_API_KEY = os.getenv("DART_API_KEY")
+    src = iframe.get("src")
+    full_url = f"https://dart.fss.or.kr{src}"
+    view_res = requests.get(full_url)
+    if view_res.status_code != 200:
+        return None, f"본문 로딩 실패: {view_res.status_code}"
 
-# 기업명 → 고유코드 맵
-CORP_CODE_MAP = {}
+    return view_res.text, None
 
-# 공모 관련 키워드
-OFFERING_KEYWORDS = ["증권신고서", "투자설명서", "공모", "청약"]
+# 본문 HTML에서 배정 관련 정보 추출 (li 또는 p 기반)
+def extract_allotment_info_from_html(html):
+    soup = BeautifulSoup(html, "html.parser")
+    texts = []
+    for tag in soup.find_all(["li", "p", "td"]):
+        txt = tag.get_text(strip=True)
+        if any(keyword in txt for keyword in ["배정", "청약", "기관", "일반청약자"]):
+            texts.append(txt)
+    return texts[:10]  # 상위 10개 정도만 반환 (필터 강화 필요 시 추가)
 
-# 서버 시작 시 기업코드 불러오기
-def load_corp_codes():
-    global CORP_CODE_MAP
-    url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={DART_API_KEY}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        with zipfile.ZipFile(BytesIO(response.content)) as z:
-            with z.open(z.namelist()[0]) as xml_file:
-                tree = ET.parse(xml_file)
-                root = tree.getroot()
-                for child in root:
-                    name = child.findtext("corp_name")
-                    code = child.findtext("corp_code")
-                    if name and code:
-                        CORP_CODE_MAP[name.strip()] = code.strip()
-
-# 배정 정보 테이블 HTML 생성
-def extract_allotment_info(html_text):
-    soup = BeautifulSoup(html_text, "html.parser")
-    items = soup.find_all("li")
-    rows = []
-    for i in range(0, len(items), 2):
-        cells = [items[i].get_text(strip=True)]
-        if i+1 < len(items):
-            cells.append(items[i+1].get_text(strip=True))
-        else:
-            cells.append("")
-        rows.append(cells)
-
-    table_html = "<table border='1' style='border-collapse:collapse;'><tr><th>항목</th><th>내용</th></tr>"
-    for row in rows:
-        table_html += f"<tr><td>{row[0]}</td><td>{row[1]}</td></tr>"
-    table_html += "</table>"
-    return table_html
-
-# 서버 기동 시 기업코드 로딩
-load_corp_codes()
-
-@app.get("/dart")
-def get_dart_info(corp: str):
-    corp_code = CORP_CODE_MAP.get(corp)
-    if not corp_code:
-        return {"error": f"기업명 '{corp}'을 찾을 수 없습니다."}
-
-    url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={corp_code}&page_count=100"
-    res = requests.get(url)
-    data = res.json()
-
-    if data.get("status") != "000":
-        return {"error": "공시정보 조회 실패", "message": data.get("message")}
-
-    reports = []
-    for item in data.get("list", []):
-        if any(keyword in item.get("report_nm", "") for keyword in OFFERING_KEYWORDS):
-            rcept_no = item.get("rcept_no")
-            html_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
-
-            # 테스트용 샘플 HTML (실제는 추후 크롤링 연결 예정)
-            sample_html = """
-            <ol>
-                <li>우리사주조합: 금번 공모는 우리사주조합에 배정하지 않습니다.</li>
-                <li>기관투자자(고위험고수익투자신탁, 벤처기업투자신탁 포함) : 총 공모주식의 75.0%(1,050,000주)를 배정합니다.</li>
-                <li>일반청약자 : 총 공모주식의 25.00%(350,000주)를 배정합니다.</li>
-                <li>따라서 금번 IPO는 일반청약자에게 350,000주를 배정할 예정이며, 균등방식 배정 예정 물량은 175,000주입니다.</li>
-            </ol>
-            """
-            allotment_html = extract_allotment_info(sample_html)
-
-            reports.append({
-                "보고서명": item.get("report_nm"),
-                "기업명": corp,
-                "공시일자": item.get("rcept_dt"),
-                "공시링크": html_url,
-                "배정내역": allotment_html
-            })
-
-    return reports if reports else {"message": f"{corp} 관련 공모 공시가 없습니다."}
+# 테스트 예시
+if __name__ == "__main__":
+    rcept_no = "20250707000070"  # 샘플 리포트 번호
+    html, err = get_dart_main_html(rcept_no)
+    if err:
+        print("오류:", err)
+    else:
+        results = extract_allotment_info_from_html(html)
+        for line in results:
+            print("-", line)
