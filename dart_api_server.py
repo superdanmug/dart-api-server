@@ -8,16 +8,16 @@ app = FastAPI()
 # CORS 설정 (GPT 호출 허용)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 어떤 출처에서든 허용 (테스트용)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ✅ 환경변수에서 DART API 키 불러오기
+# 환경변수에서 DART API 키 불러오기
 DART_API_KEY = os.getenv("DART_API_KEY")
 
-# 테스트용 간단한 기업명-코드 매핑 (추후 확장 가능)
+# 기업명 → 코드 매핑
 CORP_CODE_MAPPING = {
     "삼성전자": "00126380",
     "네이버": "00222049",
@@ -31,7 +31,15 @@ def get_dart_info(corp: str):
     if not corp_code:
         return {"error": f"기업명 '{corp}'의 corp_code를 찾을 수 없습니다."}
 
-    url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={corp_code}&page_count=5"
+    # ✅ 날짜 파라미터 추가 (2024년 1월 1일부터 최근까지)
+    url = (
+        f"https://opendart.fss.or.kr/api/list.json"
+        f"?crtfc_key={DART_API_KEY}"
+        f"&corp_code={corp_code}"
+        f"&page_count=5"
+        f"&start_dt=20240101"
+    )
+
     response = requests.get(url)
     data = response.json()
 
