@@ -1,38 +1,36 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
+import os
 
 app = FastAPI()
 
-# CORS 설정 (GPT에서 호출 허용)
+# CORS 설정 (GPT 호출 허용)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # 어떤 출처에서든 허용 (테스트용)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# DART API KEY 설정
-DART_API_KEY = "a70b2cc3a7b333ad4b91fb0c770f69d249fab3c4"
+# ✅ 환경변수에서 DART API 키 불러오기
+DART_API_KEY = os.getenv("DART_API_KEY")
 
-# 상장사 코드 조회 함수
-def get_corp_code(corp_name):
-    # DART API에서 제공하는 기업 리스트 XML을 다운받아야 정확하지만,
-    # 여기서는 간단히 주요 기업만 하드코딩 예시
-    mapping = {
-        "삼성전자": "00126380",
-        "네이버": "00222049",
-        "카카오": "00223235"
-    }
-    return mapping.get(corp_name)
+# 테스트용 간단한 기업명-코드 매핑 (추후 확장 가능)
+CORP_CODE_MAPPING = {
+    "삼성전자": "00126380",
+    "네이버": "00222049",
+    "카카오": "00223235",
+    "LG화학": "00356370"
+}
 
 @app.get("/dart")
 def get_dart_info(corp: str):
-    corp_code = get_corp_code(corp)
+    corp_code = CORP_CODE_MAPPING.get(corp)
     if not corp_code:
         return {"error": f"기업명 '{corp}'의 corp_code를 찾을 수 없습니다."}
-    
+
     url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={corp_code}&page_count=5"
     response = requests.get(url)
     data = response.json()
