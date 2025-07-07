@@ -18,16 +18,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# DART API 키
+# DART API 키 설정
 DART_API_KEY = os.getenv("DART_API_KEY")
 
-# 기업명 ↔ 고유코드 매핑 테이블
+# 기업명 → 고유코드 맵
 CORP_CODE_MAP = {}
 
-# 키워드 설정
+# 공모 관련 키워드
 OFFERING_KEYWORDS = ["증권신고서", "투자설명서", "공모", "청약"]
 
-# 기업 고유코드 로딩 함수
+# 서버 시작 시 기업코드 불러오기
 def load_corp_codes():
     global CORP_CODE_MAP
     url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={DART_API_KEY}"
@@ -43,77 +43,68 @@ def load_corp_codes():
                     if name and code:
                         CORP_CODE_MAP[name.strip()] = code.strip()
 
-# 실제 DART 본문 HTML에서 배정 내용 추출하기
-def extract_allotment_info_from_dart(rcp_no):
-    try:
-        view_url = f"https://dart.fss.or.kr/report/viewer.do?rcpNo={rcp_no}"
-        res = requests.get(view_url)
-        soup = BeautifulSoup(res.text, "html.parser")
+# 본문 HTML에서 배정 테이블 추출
+def extract_allotment_table(html_text):
+    soup = BeautifulSoup(html_text, "html.parser")
+    ol = soup.find("ol")
+    if not ol:
+        return "해당 보고서에서 배정 정보를 찾을 수 없습니다."
 
-        # iframe으로 본문 연결
-        iframe = soup.find("iframe")
-        if not iframe:
-            return []
+    rows = []
+    for li in ol.find_all("li"):
+        text = li.get_text(strip=True)
+        if any(keyword in text for keyword in ["배정", "청약자"]):
+            parts = text.split(":", 1)
+            if len(parts) == 2:
+                rows.append(f"<tr><td>{parts[0].strip()}</td><td>{parts[1].strip()}</td></tr>")
+            else:
+                rows.append(f"<tr><td colspan='2'>{text}</td></tr>")
 
-        iframe_src = iframe.get("src")
-        if not iframe_src:
-            return []
+    table_html = (
+        "<table border='1' style='border-collapse:collapse;'>"
+        "<tr><th>구분</th><th>내용</th></tr>"
+        + "".join(rows) + "</table>"
+    )
+    return table_html
 
-        html_url = f"https://dart.fss.or.kr{iframe_src}"
-        html_res = requests.get(html_url)
-        html_soup = BeautifulSoup(html_res.text, "html.parser")
-
-        text_blocks = html_soup.find_all(['p', 'li', 'td'])
-        allot_lines = [t.get_text(strip=True) for t in text_blocks if "배정" in t.get_text()]
-
-        return allot_lines[:10]  # 최대 10줄 제한
-    except Exception as e:
-        return [f"❌ 오류 발생: {str(e)}"]
-
-# 텍스트 리스트를 HTML 테이블로 변환
-def make_html_table(lines):
-    if not lines:
-        return "<p>❌ 배정 관련 정보를 찾을 수 없습니다.</p>"
-    table = "<table border='1' style='border-collapse:collapse;'>"
-    table += "<tr><th>항목</th><th>내용</th></tr>"
-    for i, line in enumerate(lines):
-        table += f"<tr><td>d{i+1}</td><td>{line}</td></tr>"
-    table += "</table>"
-    return table
-
-# 서버 시작 시 고유코드 로딩
+# 서버 기동 시 호출
 load_corp_codes()
 
-# API 엔드포인트
 @app.get("/dart")
 def get_dart_info(corp: str):
     corp_code = CORP_CODE_MAP.get(corp)
     if not corp_code:
-        return {"error": f"'{corp}'에 해당하는 고유코드를 찾을 수 없습니다."}
+        return {"error": f"기업명 '{corp}'을 찾을 수 없습니다."}
 
     url = f"https://opendart.fss.or.kr/api/list.json?crtfc_key={DART_API_KEY}&corp_code={corp_code}&page_count=100"
     res = requests.get(url)
     data = res.json()
 
     if data.get("status") != "000":
-        return {"error": "공시 목록 조회 실패", "message": data.get("message")}
+        return {"error": "공시정보 조회 실패", "message": data.get("message")}
 
-    results = []
+    reports = []
     for item in data.get("list", []):
-        title = item.get("report_nm", "")
-        if any(k in title for k in OFFERING_KEYWORDS):
-            rcp_no = item.get("rcept_no")
-            link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcp_no}"
+        if any(keyword in item.get("report_nm", "") for keyword in OFFERING_KEYWORDS):
+            rcept_no = item.get("rcept_no")
+            doc_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+            html_page = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
 
-            allot_lines = extract_allotment_info_from_dart(rcp_no)
-            table_html = make_html_table(allot_lines)
+            # 실제 본문 HTML 가져오기
+            view_url = f"https://dart.fss.or.kr/report/viewer.do?rcpNo={rcept_no}&dcmNo=&eleId=0&offset=0&length=0&dtd=dart3.xsd"
+            try:
+                html_res = requests.get(view_url, timeout=5)
+                html_text = html_res.text
+                table_html = extract_allotment_table(html_text)
+            except:
+                table_html = "<p>본문 로딩 실패</p>"
 
-            results.append({
-                "보고서명": title,
+            reports.append({
+                "보고서명": item.get("report_nm"),
                 "기업명": corp,
                 "공시일자": item.get("rcept_dt"),
-                "공시링크": link,
-                "배정내역": table_html
+                "공시링크": doc_url,
+                "배정내역_HTML": table_html
             })
 
-    return results if results else {"message": f"'{corp}' 관련 공모 보고서가 없습니다."}
+    return reports if reports else {"message": f"{corp} 관련 공모 공시가 없습니다."}
